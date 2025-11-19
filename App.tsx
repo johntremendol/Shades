@@ -6,31 +6,7 @@ import { ComposeModal } from './components/ComposeModal';
 import { Navigation } from './components/Navigation';
 import { generateHex } from './utils/colorUtils';
 import { Trash2 } from 'lucide-react';
-
-// Mock initial data for a populated feed
-const INITIAL_POSTS: Post[] = [
-  {
-    id: 'init-1',
-    authorHex: '#FF4500',
-    content: "I AM BURNING IN ORANGE SILENCE.",
-    timestamp: Date.now() - 100000,
-    stains: []
-  },
-  {
-    id: 'init-2',
-    authorHex: '#4B0082',
-    content: "THE VOID STARES BACK.",
-    timestamp: Date.now() - 200000,
-    stains: []
-  },
-  {
-    id: 'init-3',
-    authorHex: '#00FF7F',
-    content: "DIGITAL MOSS GROWS ON STATIC.",
-    timestamp: Date.now() - 300000,
-    stains: []
-  }
-];
+import { supabase } from './utils/supabaseClient';
 
 const App: React.FC = () => {
   const [user, setUser] = useState<User | null>(null);
@@ -41,26 +17,68 @@ const App: React.FC = () => {
   // Load data on mount
   useEffect(() => {
     const storedUser = localStorage.getItem('chroma_user');
-    const storedPosts = localStorage.getItem('chroma_posts');
 
     if (storedUser) {
       setUser(JSON.parse(storedUser));
       setView(ViewState.SPECTRUM);
     }
 
-    if (storedPosts) {
-      setPosts(JSON.parse(storedPosts));
-    } else {
-      setPosts(INITIAL_POSTS);
-    }
+    // Fetch Initial Posts
+    fetchPosts();
+
+    // Subscribe to Realtime Updates
+    const channel = supabase
+      .channel('public:posts')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'posts' }, (payload) => {
+        // When a new post comes in, add it to the list
+        const newPost: Post = {
+          id: payload.new.id,
+          authorHex: payload.new.author_hex,
+          content: payload.new.content,
+          timestamp: Number(payload.new.timestamp),
+          stains: [] // Initialize empty stains for new posts
+        };
+        setPosts(prev => [newPost, ...prev]);
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, []);
 
-  // Persistence effect
-  useEffect(() => {
-    if (posts.length > 0) {
-      localStorage.setItem('chroma_posts', JSON.stringify(posts));
+  const fetchPosts = async () => {
+    const { data, error } = await supabase
+      .from('posts')
+      .select(`
+        *,
+        stains (*)
+      `)
+      .order('timestamp', { ascending: false });
+
+    if (error) {
+      console.error('Error fetching posts:', error);
+      return;
     }
-  }, [posts]);
+
+    if (data) {
+      // Map DB response to our Post type
+      const mappedPosts: Post[] = data.map(p => ({
+        id: p.id,
+        authorHex: p.author_hex,
+        content: p.content,
+        timestamp: Number(p.timestamp),
+        stains: p.stains.map((s: any) => ({
+            id: s.id,
+            authorHex: s.author_hex,
+            x: s.x,
+            y: s.y,
+            timestamp: Number(s.timestamp)
+        }))
+      }));
+      setPosts(mappedPosts);
+    }
+  };
 
   const handleOnboardingComplete = (hex: string) => {
     const newUser: User = {
@@ -72,30 +90,48 @@ const App: React.FC = () => {
     setView(ViewState.SPECTRUM);
   };
 
-  const handleComposeSubmit = (content: string) => {
+  const handleComposeSubmit = async (content: string) => {
     if (!user) return;
     
-    const newPost: Post = {
-      id: crypto.randomUUID(),
-      authorHex: user.chroma_id,
+    const newPost = {
+      author_hex: user.chroma_id,
       content,
       timestamp: Date.now(),
-      stains: []
     };
 
-    setPosts(prev => [newPost, ...prev]);
+    const { error } = await supabase
+        .from('posts')
+        .insert([newPost]);
+
+    if (error) {
+        console.error("Error posting:", error);
+    }
   };
 
-  const handleStain = (postId: string, stain: Stain) => {
-    setPosts(prev => prev.map(post => {
-      if (post.id === postId) {
-        return {
-          ...post,
-          stains: [...post.stains, stain]
-        };
-      }
-      return post;
-    }));
+  const handleStain = async (postId: string, stain: Stain) => {
+      // 1. Optimistic UI Update
+      setPosts(prev => prev.map(post => {
+        if (post.id === postId) {
+          return {
+            ...post,
+            stains: [...post.stains, stain]
+          };
+        }
+        return post;
+      }));
+
+      // 2. Send to DB
+      const { error } = await supabase
+        .from('stains')
+        .insert([{
+            post_id: postId,
+            author_hex: stain.authorHex,
+            x: stain.x,
+            y: stain.y,
+            timestamp: stain.timestamp
+        }]);
+        
+      if (error) console.error("Error staining:", error);
   };
 
   const handleClearData = () => {
