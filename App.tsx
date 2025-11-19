@@ -28,17 +28,37 @@ const App: React.FC = () => {
 
     // Subscribe to Realtime Updates
     const channel = supabase
-      .channel('public:posts')
+      .channel('public:posts_and_stains')
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'posts' }, (payload) => {
-        // When a new post comes in, add it to the list
         const newPost: Post = {
           id: payload.new.id,
           authorHex: payload.new.author_hex,
           content: payload.new.content,
           timestamp: Number(payload.new.timestamp),
-          stains: [] // Initialize empty stains for new posts
+          stains: []
         };
         setPosts(prev => [newPost, ...prev]);
+      })
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'stains' }, (payload) => {
+        const newStain: Stain = {
+            id: payload.new.id,
+            authorHex: payload.new.author_hex,
+            x: payload.new.x,
+            y: payload.new.y,
+            timestamp: Number(payload.new.timestamp)
+        };
+        
+        setPosts(prev => prev.map(post => {
+            if (post.id === payload.new.post_id) {
+                // Avoid duplicates if we added it optimistically
+                if (post.stains.some(s => s.id === newStain.id)) return post;
+                return {
+                    ...post,
+                    stains: [...post.stains, newStain]
+                };
+            }
+            return post;
+        }));
       })
       .subscribe();
 
